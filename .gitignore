@@ -31,6 +31,13 @@ data_process.ipynb
 run_inf.sh           
 wandb/*
 
+.so3_cdf_vals2.npy         
+.so3_score_norms2.npy
+.p.npy      
+.so3_exp_score_norms2.npy
+.score.npy  
+.so3_omegas_array2.npy
+
 
 !ckpts/.gitkeep   
 !datasets/.gitkeep  
@@ -40,3 +47,5 @@ wandb/*
 !eva_out/.gitkeep   
 !out_jobs/.gitkeep  
 !visualization/.gitkeep
+
+
