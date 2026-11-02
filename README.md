@@ -11,7 +11,7 @@ HierADiff predicts protein-protein complexes from separately supplied unbound st
 
 > **Repository status**
 >
-> This repository is currently a research-code release. The source tree, configurations, evaluation outputs, and an inference notebook are available, but the `ckpts/` directory does not currently contain the trained weights required to reproduce inference from a clean clone. The final paper checkpoint, matching configuration, and a tested end-to-end example should be added before describing the repository as fully reproducible.
+> This repository is currently a research-code release. The source tree, configurations, evaluation outputs, and an inference notebook are available, but the `ckpts/` directory does not currently contain the trained weights required to reproduce inference from a clean clone. The final paper checkpoint, matching configuration, and a tested end-to-end example will be added.
 
 ## Abstract
 
