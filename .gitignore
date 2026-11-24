@@ -7,7 +7,6 @@ bootstrap_dataset.py
 eva_out/*              
 starter_2.sh
 calc_irmsd.py                    
-goodluck.txt         
 starter_3.sh
 cat_updates.pkl                  
 grace_cpu.job        
@@ -49,3 +48,12 @@ wandb/*
 !visualization/.gitkeep
 
 
+
+# Python-generated files
+__pycache__/
+*.pyc
+
+# Generated inference caches and predictions
+.hieradiff_dips/
+.hieradiff_cache/
+hieradiff_predictions/

@@ -1,0 +1,76 @@
+---
+ # file is parsed by inner-most keys only
+ data:
+     dataset: dips
+     data_file: datasets/DB5/splits.csv ######
+     data_path: datasets/DB5/pairs_pruned
+     resolution: residue
+     no_graph_cache: False ####
+     knn_size: 20
+     use_orientation_features: False
+     multiplicity: 1
+
+
+     filter_len_r_plus_l_max: 0
+     subset: null
+
+     shuffle: True
+
+     randomRL: True
+
+ model:
+     natural_exp: True
+    #  intra_equi_nm_node_f: True
+    #  expanded_edge_w_l0_features: True
+    #  expanded_edge_w_freq_features: True
+
+     model_type: iRMSD_pred
+     contrastive: True
+
+     res_rot_flex: True
+    #  subset: /scratch/user/rujieyin/DyDock/datasets/DIPS/hetero_data_excludeOne.csv
+
+     interModuleNoSharedWeight: True
+
+
+     recLigMismatchingInterLayer: True
+     num_conv_layers: 5
+     indReadoutFlex_noSharedWeight: True
+
+
+     attention: False
+
+     no_nm: False
+     no_batch_norm: True
+     lm_embed_dim: 1280
+     dropout: 0.0
+     dynamic_max_cross: False
+     cross_cutoff_weight: 3
+     cross_cutoff_bias: 40
+     cross_max_dist: 80
+
+     ns: 32
+     nv: 8
+     dist_embed_dim: 32
+     cross_dist_embed_dim: 32
+     sigma_embed_dim: 32
+     max_radius: 5.
+ train:
+     patience: 150
+     epochs: 2000
+     lr: 1.e-3
+     weight_decay: 0.
+     tr_weight: 1
+     rot_weight: 1
+     rec_flex_weight: 1
+     lig_flex_weight: 1
+     lddt_weight: 1
+     val_inference_freq: 10
+     num_steps: 40
+ diffusion:
+     tr_s_min: 0.01
+     tr_s_max: 30.0
+     rot_s_min: 0.01
+     rot_s_max: 1.65
+     sample_train: True
+     num_inference_complexes_train_data: 1200

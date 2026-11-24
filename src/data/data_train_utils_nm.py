@@ -378,6 +378,42 @@ class Loader:
         for key, item in tqdm(data.items(), desc='to_graph; in process_data'):
             print(key)
 
+            # Inference from unbound structures only.
+            # Preserve the original bound/unbound branch below.
+            if not item.get("has_bound", True):
+                from data.unbound_graph import build_unbound_graph
+
+                if args.resolution != "residue":
+                    raise ValueError(
+                        "Unbound inference requires residue resolution"
+                    )
+
+                for protein in ("receptor", "ligand"):
+                    if item.get(f"{protein}_u_bb_coords") is None:
+                        raise ValueError(
+                            f"{key}: missing {protein} backbone coordinates"
+                        )
+
+                    n = len(item[f"{protein}_u_seq"])
+                    item[f"{protein}_mask"] = torch.ones(
+                        n, dtype=torch.bool
+                    )
+
+                if (
+                    len(item["receptor_u_seq"]) <= args.filter_len_r_or_l
+                    or len(item["ligand_u_seq"]) <= args.filter_len_r_or_l
+                ):
+                    print(f"skip {key}: protein too short")
+                    ct += 1
+                    continue
+
+                item["graph"] = build_unbound_graph(
+                    item, n_nm=args.n_NM
+                )
+                new_data[key] = item
+                continue
+
+
             if item[f"receptor_b_bb_coords"] is None or item[f"ligand_b_bb_coords"] is None or item[f"receptor_u_bb_coords"] is None or item[f"ligand_u_bb_coords"] is None:
                 print(f'skip {key} because one of the bb_coords is None.')
                 ct += 1
@@ -494,8 +530,14 @@ class Loader:
         # tokenize atoms
         atom_tokenizer = tokenize(data.values(), "receptor_u_atom")
         tokenize(data.values(), "ligand_u_atom", atom_tokenizer)
-        tokenize(data.values(), "receptor_b_atom", atom_tokenizer)
-        tokenize(data.values(), "ligand_b_atom", atom_tokenizer)
+        bound_items = [
+            item for item in data.values()
+            if "receptor_b_atom" in item
+            and "ligand_b_atom" in item
+        ]
+        if bound_items:
+            tokenize(bound_items, "receptor_b_atom", atom_tokenizer)
+            tokenize(bound_items, "ligand_b_atom", atom_tokenizer)
         data_params["atom_tokenizer"] = atom_tokenizer
         printt("finished tokenizing all inputs")
 
@@ -941,7 +983,10 @@ class Loader:
             rec_graph = data[pdb]["graph"]["receptor"]
             lig_graph = data[pdb]["graph"]["ligand"]
 
-            if len(rec_graph.pos_b) != len(rec_rep) or len(lig_graph.pos_b) != len(lig_rep):
+            rec_pos = rec_graph.pos_b if "pos_b" in rec_graph else rec_graph.pos_u
+            lig_pos = lig_graph.pos_b if "pos_b" in lig_graph else lig_graph.pos_u
+
+            if len(rec_pos) != len(rec_rep) or len(lig_pos) != len(lig_rep):
                 data.pop(pdb, None)
                 print(f'skip {pdb} bc lengths mismatch')
                 cc += 1
@@ -949,14 +994,14 @@ class Loader:
             
             rec_graph.x_ori = rec_rep
             lig_graph.x_ori = lig_rep
-            assert len(rec_graph.pos_b) == len(rec_graph.x_ori)
+            assert len(rec_pos) == len(rec_graph.x_ori)
             # print(f'len(rec_graph.pos): {len(rec_graph.pos)}')
             # print(f'len(rec_graph.x_ori): {len(rec_graph.x_ori)}')
             # print('***')
             # print(f'len(lig_graph.pos): {len(lig_graph.pos)}')
             # print(f'len(lig_graph.x_ori): {len(lig_graph.x_ori)}')
             # print('-----')
-            assert len(lig_graph.pos_b) == len(lig_graph.x_ori)
+            assert len(lig_pos) == len(lig_graph.x_ori)
 
             
         
@@ -1043,7 +1088,11 @@ class DIPSLoader(Loader):
         flder_csv = os.path.dirname(self.data_file)
         # pth_mask = os.path.join(flder_csv, "mask.pkl")
 
-        self.mask = pickle.load(open(os.path.join(flder_csv, "mask.pkl"), "rb"))
+        mask_path = os.path.join(flder_csv, "mask.pkl")
+        self.mask = (
+            pickle.load(open(mask_path, "rb"))
+            if os.path.isfile(mask_path) else {}
+        )
 
         self.data = None # {pdb_id: {k:v}}
         self.data_params = None # {k_params: v_params}
@@ -1256,8 +1305,8 @@ class DIPSLoader(Loader):
 
                     each_data = pickle.load(open(pth, "rb"))
 
-                    r_len = each_data["graph"]["receptor"].pos_b.shape[0]
-                    l_len = each_data["graph"]["ligand"].pos_b.shape[0]
+                    r_len = (each_data["graph"]["receptor"].pos_b if "pos_b" in each_data["graph"]["receptor"] else each_data["graph"]["receptor"].pos_u).shape[0]
+                    l_len = (each_data["graph"]["ligand"].pos_b if "pos_b" in each_data["graph"]["ligand"] else each_data["graph"]["ligand"].pos_u).shape[0]
 
                     dict_pdb_to_totalLen[pdb_id] = r_len + l_len
 
@@ -1291,8 +1340,8 @@ class DIPSLoader(Loader):
 
                     each_data = pickle.load(open(pth, "rb"))
 
-                    r_len = each_data["graph"]["receptor"].pos_b.shape[0]
-                    l_len = each_data["graph"]["ligand"].pos_b.shape[0]
+                    r_len = (each_data["graph"]["receptor"].pos_b if "pos_b" in each_data["graph"]["receptor"] else each_data["graph"]["receptor"].pos_u).shape[0]
+                    l_len = (each_data["graph"]["ligand"].pos_b if "pos_b" in each_data["graph"]["ligand"] else each_data["graph"]["ligand"].pos_u).shape[0]
 
                     dict_pdb_to_totalLen[pdb_id] = r_len + l_len
 
@@ -1468,38 +1517,55 @@ class DIPSLoader(Loader):
         # for line in tqdm(self.data_to_load,
         #                  desc="data loading", ncols=50):
         for line in tqdm_obj:
-            path = line["path"] # 'ke/1kee.pdb1_6.dill'
+            path = line["path"]
             item = path_to_data.get(path)
+            fp_u = os.path.join(self.root, path)
 
-            if not self.args.model_type == 'confidence':
-                if (not os.path.exists(os.path.join(self.root, path)[:-5] + '.bound.dill')) or (not os.path.exists(os.path.join(self.root, path))):
-                    print(f"skip {path} because either bound or unbound dill file is missing")
-                    continue
+            if not os.path.isfile(fp_u):
+                raise FileNotFoundError(fp_u)
+
+            if self.args.model_type == "confidence":
+                fp_b = os.path.join(
+                    self.root, path[:7]
+                ) + ".bound.dill"
             else:
-                if (not os.path.exists(os.path.join(self.root, path[:7]) + '.bound.dill')) or (not os.path.exists(os.path.join(self.root, path))):
-                    print(f"skip {path} because either bound or unbound dill file is missing")
-                    continue
+                if not fp_u.endswith(".dill"):
+                    raise ValueError(fp_u)
+                fp_b = fp_u[:-5] + ".bound.dill"
 
-            
+            has_bound = os.path.isfile(fp_b)
+
+            if not has_bound and line.get("unbound_only") != "1":
+                print(f"skip {path}: missing bound DILL")
+                continue
+
+            if has_bound and not self.mask:
+                raise FileNotFoundError(
+                    "Bound data requires a valid mask.pkl"
+                )
+
             if item is None:
-
-                # parse_dill_nm(self, fp_b, fp_u, pdb_id)
-                # fp_b: 'datasets/DIPS/pairs_pruned/ke/1kee.pdb1_6.bound.dill'
-                # fp_u: 'datasets/DIPS/pairs_pruned/ke/1kee.pdb1_6.dill'
-                # pdb_id: 'ke/1kee.pdb1_6.dill'
-                if not self.args.model_type == 'confidence':
-                    item = self.parse_dill_nm(os.path.join(self.root, path)[:-5] + '.bound.dill', os.path.join(self.root, path), path)
+                if has_bound:
+                    item = self.parse_dill_nm(
+                        fp_b, fp_u, path
+                    )
                 else:
-                    item = self.parse_dill_nm(os.path.join(self.root, path[:7]) + '.bound.dill', os.path.join(self.root, path), path)
-                
+                    raw = self.parse_dill(fp_u, path)
+                    item = {
+                        "pdb_id": path,
+                        "receptor_u": raw["receptor"],
+                        "ligand_u": raw["ligand"],
+                    }
 
-                #[!!!]
-                # print("rec[0]", item["receptor_b"][0])
-                # print(aaaaa)
-
-
+                item["has_bound"] = has_bound
                 path_to_data[path] = item
-            
+            else:
+                if item.get("has_bound", has_bound) != has_bound:
+                    raise RuntimeError(
+                        "Cached input format differs from files"
+                    )
+                item["has_bound"] = has_bound
+
             item.update(line)  # add meta-data
 
             # item = {
@@ -1549,6 +1615,18 @@ class DIPSLoader(Loader):
         # new_data = {}
         # ct = 0
         for key, item in tqdm(data.items(), desc='in assign_receptor'):
+
+            if not item.get("has_bound", True):
+                if item.get("unbound_only") == "1":
+                    continue
+
+                rec = item["receptor_u"]
+                lig = item["ligand_u"]
+
+                if len(rec[0]) < len(lig[0]):
+                    item["receptor_u"], item["ligand_u"] = lig, rec
+
+                continue
 
             rec = item["receptor_b"]
             lig = item["ligand_b"]

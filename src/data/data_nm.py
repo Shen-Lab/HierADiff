@@ -474,8 +474,16 @@ class BindingDataset_nm(Dataset):
 
         item = data["graph"]
 
-        item.rec_res_name_b = data['receptor_b_seq']
-        item.lig_res_name_b = data['ligand_b_seq']
+        item.rec_res_name_b = (
+            data['receptor_b_seq']
+            if 'receptor_b_seq' in data
+            else data['receptor_u_seq']
+        )
+        item.lig_res_name_b = (
+            data['ligand_b_seq']
+            if 'ligand_b_seq' in data
+            else data['ligand_u_seq']
+        )
 
 
 

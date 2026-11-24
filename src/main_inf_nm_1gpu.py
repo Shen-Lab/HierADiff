@@ -141,17 +141,52 @@ def main(args=None, model_pth=None, output_rmsd=False, output_coeffs=False, outp
 
     printt("random seed set to", args.seed)
 
-    # load data params
-    # data_params = load_data(args, split="test", batch=0).data_params # ori
-    data_params = load_data_nm(args).data_params
-    print("Loaded the data params")
+    # Convert raw PDBs to DIPS format, then use the normal loader.
+    input_dir = Path(args.data_path).resolve()
+
+    receptor_exists = (input_dir / "receptor.pdb").is_file()
+    ligand_exists = (input_dir / "ligand.pdb").is_file()
+
+    if receptor_exists != ligand_exists:
+        raise ValueError("Both receptor.pdb and ligand.pdb are required")
+
+    raw_pdb_input = receptor_exists and ligand_exists
+
+    if raw_pdb_input:
+        from data.pdb_to_dill import prepare_dips_input
+
+        if args.model_type != "flexFM_Rt":
+            raise ValueError("Raw PDB inference requires flexFM_Rt")
+
+        root, manifest = prepare_dips_input(input_dir)
+
+        args.dataset = "dips"
+        args.data_path = str(root)
+        args.data_file = str(manifest)
+
+        if output_path is None:
+            output_path = str(input_dir / "hieradiff_predictions")
+
+        print("DIPS_RAW_PDB_INPUT_DETECTED")
+        print("DIPS manifest:", manifest)
+
+        data = load_data_nm(args)
+        data_params = data.data_params
+
+    else:
+        # Preserve the original benchmark data-loading behavior.
+        data_params = load_data_nm(args).data_params
+        print("Loaded the data params")
+        data = load_data_nm(args)
 
     args.subset = None
     printt("subset:", args.subset)
 
-    # load data
-    data = load_data_nm(args)
-    loaders_for_reverse_diffusion = get_data_nm(data, fold, args, for_reverse_diffusion=True, reg_model_train=False)
+    loaders_for_reverse_diffusion = get_data_nm(
+        data, fold, args,
+        for_reverse_diffusion=True,
+        reg_model_train=False,
+    )
 
     # get model and load checkpoint, if relevant
     model = load_model_for_training_nm(args, data_params, fold, load_best=False, model_pth=model_pth) # load last_model to continue training # !!!!!!!!!!!!!!!!!! load_best = False : use the latest model !!!!!!!!!!!!!!!!!!!
@@ -250,7 +285,24 @@ def main(args=None, model_pth=None, output_rmsd=False, output_coeffs=False, outp
                         visualize_first_n_samples=args.visualize_n_val_graphs,
                         visualization_dir=args.visualization_path)
         elif args.model_type == "flexFM_Rt":
-            if lddt_out:
+            if raw_pdb_input:
+                # Reset RNG after preprocessing/model loading.
+                # This makes cold-cache and warm-cache docking
+                # start from the same random state.
+                set_seed(args.seed)
+                print(f"RAW_DOCKING_SEED_RESET: {args.seed}")
+                samples_val, all_results = sample_flexFM_Rt(
+                    data_list, model, args,
+                    epoch=epoch_num,
+                    visualize_first_n_samples=args.visualize_n_val_graphs,
+                    visualization_dir=args.visualization_path,
+                    all_results=(
+                        all_results if all_results is not None else {}
+                    ),
+                    output_path=output_path,
+                    pkl_ind="" if pkl_ind is None else pkl_ind,
+                )
+            elif lddt_out:
                 samples_val, all_results = sample_flexFM_Rt(data_list, model, args, epoch=epoch_num,
                         visualize_first_n_samples=args.visualize_n_val_graphs,
                         visualization_dir=args.visualization_path, all_results=all_results, output_path=output_path, pkl_ind=pkl_ind)
@@ -274,6 +326,9 @@ def main(args=None, model_pth=None, output_rmsd=False, output_coeffs=False, outp
 
 
         # meter = evaluate_all_rmsds(data_list, samples_val)
+        if raw_pdb_input:
+            return all_results
+
         meter = evaluate_all_rmsds(samples_val)
 
         # #
@@ -445,7 +500,13 @@ if __name__ == "__main__":
 
     if "DATA_PATH" in os.environ:
         args.data_path = os.environ["DATA_PATH"]
-        args.data_file = os.environ["DATA_FILE"]
+        if "DATA_FILE" in os.environ:
+            args.data_file = os.environ["DATA_FILE"]
+        elif not any(
+            (Path(args.data_path) / filename).is_file()
+            for filename in ("receptor.pdb", "ligand.pdb")
+        ):
+            raise KeyError("DATA_FILE")
 
     if "OUTPUT_PATH" in os.environ:
         output_path = os.environ["OUTPUT_PATH"]

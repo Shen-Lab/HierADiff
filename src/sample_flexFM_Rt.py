@@ -32,6 +32,134 @@ DEBUG_no_random = True # False #
 
 
 
+
+# AUTO_UNBOUND_INFERENCE
+def _has_bound_reference(graph):
+    """Detect real bound coordinates, not legacy feature names."""
+    return all(
+        "pos_b_ori" in graph[chain]
+        and "bb_atoms_b" in graph[chain]
+        for chain in ("receptor", "ligand")
+    )
+
+
+_UNBOUND_IRMSD_MODEL = None
+
+
+def _predict_unbound_irmsd(graph):
+    """Predict iRMSD using only unbound coordinates and ESM features."""
+    global _UNBOUND_IRMSD_MODEL
+
+    from pathlib import Path
+    from types import SimpleNamespace
+    import yaml
+    from torch_geometric.data import Batch
+    from model.model_nm import iRMSD_predModel
+
+    if _has_bound_reference(graph):
+        raise ValueError("Expected an unbound-only graph")
+
+    if _UNBOUND_IRMSD_MODEL is None:
+        root = Path(__file__).resolve().parent.parent
+        run = root / "ckpts/DEBUG_db5_iRMSD_pred_contr"
+        ckpt = (
+            run / "fold_0/"
+            "model_best_12075_1002_0.993_0.993.pth"
+        )
+        args_file = run / "args.yaml"
+
+        for path in (ckpt, args_file):
+            if not path.is_file():
+                raise FileNotFoundError(path)
+
+        # Training-generated args.yaml contains a serialized
+        # torch.device. Permit this specific tag safely.
+        class CheckpointArgsLoader(yaml.SafeLoader):
+            pass
+
+        def construct_torch_device(loader, node):
+            values = loader.construct_sequence(node, deep=True)
+            if len(values) == 1 and isinstance(values[0], str):
+                return torch.device(values[0])
+            if (
+                len(values) == 2
+                and isinstance(values[0], str)
+                and isinstance(values[1], int)
+            ):
+                return torch.device(values[0], values[1])
+            raise ValueError(f"Invalid torch.device YAML value: {values!r}")
+
+        CheckpointArgsLoader.add_constructor(
+            "tag:yaml.org,2002:python/object/apply:torch.device",
+            construct_torch_device,
+        )
+
+        with args_file.open() as f:
+            model_args = SimpleNamespace(**yaml.load(
+                f, Loader=CheckpointArgsLoader
+            ))
+
+        if model_args.model_type != "iRMSD_pred":
+            raise ValueError("Wrong iRMSD model configuration")
+
+        predictor = iRMSD_predModel(
+            model_args, {"num_residues": 23}
+        )
+
+        state = torch.load(
+            ckpt, map_location="cpu"
+        )["model"]
+
+        if state and all(
+            k.startswith("module.") for k in state
+        ):
+            state = {
+                k[len("module."):]: v
+                for k, v in state.items()
+            }
+
+        predictor.load_state_dict(state, strict=True)
+
+        device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+        _UNBOUND_IRMSD_MODEL = predictor.to(device).eval()
+        print("Loaded trained unbound iRMSD predictor")
+
+    device = next(
+        _UNBOUND_IRMSD_MODEL.parameters()
+    ).device
+
+    g = copy.deepcopy(graph)
+
+    for chain in ("receptor", "ligand"):
+        store = g[chain]
+        store.pos = store.pos_u[store.mask].clone()
+        store.x = store.x_ori.clone()
+        store.num_nodes = store.pos.shape[0]
+
+    batch = Batch.from_data_list([g]).to(device)
+
+    with torch.no_grad():
+        outputs = _UNBOUND_IRMSD_MODEL(batch)
+
+    pred = outputs["irmsd_pred"].reshape(-1)
+
+    if pred.numel() != 1 or not torch.isfinite(pred).all():
+        raise RuntimeError("Invalid predicted iRMSD")
+
+    value = float(pred.item())
+
+    if not 0.35 <= value <= 8.0:
+        raise RuntimeError(f"Unexpected iRMSD: {value}")
+
+    print(
+        f"Predicted unbound iRMSD for {graph.name}: "
+        f"{value:.4f} Å"
+    )
+    return value
+
+
 # [nm]
 def sample_flexFM_Rt(data_list, model, args, epoch=0, visualize_first_n_samples=0,
            visualization_dir="./visualization", in_batch_size=None, output_coeffs=False, all_results=None, output_path=None, pkl_ind=None):
@@ -80,10 +208,33 @@ def sample_flexFM_Rt(data_list, model, args, epoch=0, visualize_first_n_samples=
     #     ori_data_list = ori_data_list.to("cpu").to_data_list()
 
 
-    ori_meter = evaluate_all_ori_rmsds(data_list)
-    _,_,_,_,_ = ori_meter.summarize(verbose=True)
+    reference_flags = [
+        _has_bound_reference(data_list[i])
+        for i in range(len(data_list))
+    ]
 
-    names = ori_meter.names
+    if not reference_flags:
+        raise ValueError("No complexes to sample")
+
+    if any(reference_flags) and not all(reference_flags):
+        raise ValueError(
+            "Mixed bound/unbound batches are not yet supported"
+        )
+
+    has_bound_ref = all(reference_flags)
+
+    if has_bound_ref:
+        ori_meter = evaluate_all_ori_rmsds(data_list)
+        _,_,_,_,_ = ori_meter.summarize(verbose=True)
+        names = ori_meter.names
+    else:
+        names = [
+            data_list[i].name for i in range(len(data_list))
+        ]
+        if all_results is None:
+            all_results = {}
+
+        print("Unbound-only input detected; skipping GT metrics")
 
     if all_results is not None:
         if all_results == {}:
@@ -460,19 +611,20 @@ def sample_flexFM_Rt(data_list, model, args, epoch=0, visualize_first_n_samples=
                 for i in range(len(data_list)):
                     write_pdb_each(f"{the_output_dir}/{names[i].split('/')[1]}_rs{args.seed}.pdb", data_list[i]["receptor"].bb_atoms, data_list[i].rec_res_name_b, data_list[i]["ligand"].bb_atoms, data_list[i].lig_res_name_b, rwmode='w')
             
-            updates_meter = evaluate_all_rmsds(new_data_list)
-            # _,_,_,_ = updates_meter.summarize(verbose=True) #[????]
-            complex_rmsd_list, interface_rmsd_list, names, true_lddt_list, fnat_list, ligand_rmsd_list, docking_quality_list = updates_meter.complex_rmsd_list, updates_meter.interface_rmsd_list, \
-            updates_meter.names, updates_meter.true_lddt_list, updates_meter.fnat_list, updates_meter.ligand_rmsd_list, updates_meter.docking_quality_list
+            if has_bound_ref:
+                updates_meter = evaluate_all_rmsds(new_data_list)
+                # _,_,_,_ = updates_meter.summarize(verbose=True) #[????]
+                complex_rmsd_list, interface_rmsd_list, names, true_lddt_list, fnat_list, ligand_rmsd_list, docking_quality_list = updates_meter.complex_rmsd_list, updates_meter.interface_rmsd_list, \
+                updates_meter.names, updates_meter.true_lddt_list, updates_meter.fnat_list, updates_meter.ligand_rmsd_list, updates_meter.docking_quality_list
 
-            # update all_results for IRMSD and CRMSD and tLDDT and LRMSD and fnat and docking_quality
-            for i, name in enumerate(names):
-                all_results[name]['IRMSD'].append(interface_rmsd_list[i])
-                all_results[name]['CRMSD'].append(complex_rmsd_list[i])
-                all_results[name]['LRMSD'].append(ligand_rmsd_list[i])
-                all_results[name]['tLDDT'].append(true_lddt_list[i])
-                all_results[name]['fnat'].append(fnat_list[i])
-                all_results[name]['docking_quality'].append(docking_quality_list[i])
+                # update all_results for IRMSD and CRMSD and tLDDT and LRMSD and fnat and docking_quality
+                for i, name in enumerate(names):
+                    all_results[name]['IRMSD'].append(interface_rmsd_list[i])
+                    all_results[name]['CRMSD'].append(complex_rmsd_list[i])
+                    all_results[name]['LRMSD'].append(ligand_rmsd_list[i])
+                    all_results[name]['tLDDT'].append(true_lddt_list[i])
+                    all_results[name]['fnat'].append(fnat_list[i])
+                    all_results[name]['docking_quality'].append(docking_quality_list[i])
 
     
 
@@ -589,7 +741,8 @@ def sample_flexFM_Rt(data_list, model, args, epoch=0, visualize_first_n_samples=
 
             # bb_atoms
             for i, complex_graph in enumerate(complex_graphs):
-                gt_pred_bb_atoms[complex_graph.name] = ((complex_graph["receptor"].bb_atoms_b, complex_graph["ligand"].bb_atoms_b), (complex_graph["receptor"].bb_atoms, complex_graph["ligand"].bb_atoms))
+                if has_bound_ref:
+                    gt_pred_bb_atoms[complex_graph.name] = ((complex_graph["receptor"].bb_atoms_b, complex_graph["ligand"].bb_atoms_b), (complex_graph["receptor"].bb_atoms, complex_graph["ligand"].bb_atoms))
 
             
             
@@ -602,7 +755,8 @@ def sample_flexFM_Rt(data_list, model, args, epoch=0, visualize_first_n_samples=
             # update all_results for pLDDT
             for name in all_lddt_scores:
                 all_results[name]['pLDDT'].append(all_lddt_scores[name])
-                all_results[name]['gt_pred_recLig_bb_atoms'].append(gt_pred_bb_atoms[name])
+                if has_bound_ref:
+                    all_results[name]['gt_pred_recLig_bb_atoms'].append(gt_pred_bb_atoms[name])
             # save all_results to the_output_dir/all_results.pkl
             with open(os.path.join(the_output_dir, f'all_results.pkl{pkl_ind}'), 'wb') as f:
                 pickle.dump(all_results, f)
@@ -820,8 +974,11 @@ def randomize_position_AND_use_unbound(data_list, args):
 
     data_list = data_list.deepcopy()
 
-    if args.adaptive_schedule:
-        pkl_path='/scratch/user/rujieyin/DyDock/cat_updates.pkl'
+    if args.adaptive_schedule and any(
+        _has_bound_reference(data_list[i])
+        for i in range(len(data_list))
+    ):
+        pkl_path=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cat_updates.pkl')
         with open(pkl_path, 'rb') as f:
             pred_iRMSD_di = pickle.load(f)
         
@@ -910,16 +1067,20 @@ def randomize_position_AND_use_unbound(data_list, args):
         
 
         if args.adaptive_schedule:
-            name = complex_graph.name
+            if _has_bound_reference(complex_graph):
+                name = complex_graph.name
 
-            if name not in pred_iRMSD_di:
-                print("name not in pred_iRMSD_di, so it is either in train or val set")
-                if "irmsd" in complex_graph:
-                    irmsd = complex_graph.irmsd.item()
+                if name not in pred_iRMSD_di:
+                    print("name not in pred_iRMSD_di, so it is either in train or val set")
+                    if "irmsd" in complex_graph:
+                        irmsd = complex_graph.irmsd.item()
+                    else:
+                        irmsd = compute_irmsd(complex_graph['ligand'].pos_b_ori, complex_graph["receptor"].pos_b_ori, complex_graph['ligand'].pos_u[complex_graph['ligand'].mask], complex_graph['receptor'].pos_u[complex_graph['receptor'].mask], complex_graph.name)
                 else:
-                    irmsd = compute_irmsd(complex_graph['ligand'].pos_b_ori, complex_graph["receptor"].pos_b_ori, complex_graph['ligand'].pos_u[complex_graph['ligand'].mask], complex_graph['receptor'].pos_u[complex_graph['receptor'].mask], complex_graph.name)
+                    irmsd = pred_iRMSD_di[name].item()
+
             else:
-                irmsd = pred_iRMSD_di[name].item()
+                irmsd = _predict_unbound_irmsd(complex_graph)
 
             alpha = 0.99
             adaptive_c = ((-np.log(1-alpha)*np.log(3000.0))/(np.log(np.clip(irmsd, a_min=0.35, a_max=8.0))+np.log(100.0))) # c=10.4 to c=5.5
