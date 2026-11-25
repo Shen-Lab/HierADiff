@@ -143,12 +143,6 @@ Complex RMSD and interface RMSD are computed using
 `RMSDComputer.update_complex_rmsd` and
 `RMSDComputer.update_interface_rmsd`, respectively.
 
-## Data availability
-
-The processed DB5.5 and DIPS-AF datasets used in HierADiff are available on [Zenodo][https://doi.org/10.5281/zenodo.24491375].
-
-The archives include bound and unbound protein structures in DILL format, train/validation/test splits, and residue correspondence masks. Graph representations and other derived features can be generated using the preprocessing code provided in this repository.
-
 
 ## Abstract
 
