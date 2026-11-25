@@ -143,6 +143,13 @@ Complex RMSD and interface RMSD are computed using
 `RMSDComputer.update_complex_rmsd` and
 `RMSDComputer.update_interface_rmsd`, respectively.
 
+## Data availability
+
+The processed DB5.5 and DIPS-AF datasets used in HierADiff are available on [Zenodo][https://doi.org/10.5281/zenodo.24491375].
+
+The archives include bound and unbound protein structures in DILL format, train/validation/test splits, and residue correspondence masks. Graph representations and other derived features can be generated using the preprocessing code provided in this repository.
+
+
 ## Abstract
 
 Structural prediction of protein-protein complexes is important for mechanistic understanding and therapeutic discovery, yet structure-based flexible docking remains challenging when binding is accompanied by conformational change. We present **HierADiff**, an induced-fit-inspired generative framework that models docking from separately supplied unbound structures as coupled global association and local backbone accommodation. Global protein-level rigid-body motions are modeled by diffusion, whereas local residue-level transformations are modeled by flow matching with a distinct schedule. A target-adaptive local schedule is conditioned on the predicted magnitude of binding-associated conformational change, allowing the progression of backbone refinement to vary across targets. The global and local processes are coupled through a shared score-and-confidence network that integrates sequence, evolutionary, structural, and normal-mode-derived dynamics features while maintaining the required transformation properties of its outputs. To support pretraining, we curate DIPS-AF, a dataset of 38,887 protein-protein complexes with paired bound and predicted unbound monomer structures, and fine-tune the model on the training split of Docking Benchmark 5.5 (DB5.5). On the DB5.5 test set, **HierADiff** achieves lower mean and median complex RMSD and interface RMSD than DiffDock-PP, a rigid-body diffusion model, and GeoDock, a flexible iterative-refinement model. Ablation results support the contributions of the adaptive schedule and DIPS-AF pretraining. However, near-native recovery remains limited, and confidence-based ranking falls short of oracle selection. These results support hierarchical and target-adaptive coordination of global association and local backbone accommodation as a promising direction for structure-based flexible docking.
